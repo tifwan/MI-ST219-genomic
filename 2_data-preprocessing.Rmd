@@ -1,0 +1,296 @@
+---
+title: "2_preprocess_data_for_analysis"
+author: "Tiffany Wan"
+date: "2025-05-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# read in metadata of HCF type information
+HCF_info <- fread("/Users/tifwan/RA/MDHSS/data/HCF_info_coord.csv") %>%
+  select(-V1)
+HCF_info$HCF_CCN <- gsub("A","",HCF_info$HCF_CCN)
+
+# read in masked variant calling output
+dna_aln <- read.dna("/Users/tifwan/Desktop/flux_mount_gl/Project_MDHHS_genomics/old_Sequence_data/ST219_Public_genomes/2022_08_24_MDHHS_Public_variant_calling/2022_08_25_16_34_37_core_results/gubbins/2022_08_25_16_34_37_SAMN26729713_genome_aln_w_alt_allele_unmapped.filtered_polymorphic_sites.fasta", format = "fasta", as.matrix=TRUE,as.character = "TRUE")
+
+# read in patient trace data
+setwd("~/RA/MDHSS/R_script")
+patient_loc <- read.csv("../data/2022_08_25_location_time.csv")
+patient_ID <- read_xlsx("/Users/tifwan/Dropbox (University of Michigan)/Michigan_CRE_Genomics/NDM Kpneumoniae ST219 7-11-22_update 10-4.xlsx",sheet = 2)
+MDHHS_list <- fread("../data/MI_isolate_accn.tsv",)
+iqtree <- read.tree("/Users/tifwan/Desktop/flux_mount_gl/Project_MDHHS_genomics/old_Sequence_data/ST219_Public_genomes/2022_08_24_MDHHS_Public_variant_calling/2022_08_25_16_34_37_core_results/gubbins/iqtree_results/2022_08_25_16_34_37_SAMN26729713_genome_aln_w_alt_allele_unmapped.treefile")
+
+# key matching Isolate_ID, NCBI_SAMN
+key <- fread("/Users/tifwan/Dropbox (University of Michigan)/Michigan_CRE_Genomics/Genome meta-data/st219_lookup_table.txt")
+
+isolate_pt <- read_xlsx("~/RA/MDHSS/data/isolate_ID_PatientID_match.xlsx")
+```
+
+
+```{r}
+# rename HCF_name variables to match the patient HCF transfer network
+HCF_info$HCF_name<- gsub("Advantage Living Center Samaritan.*","Advantage Living Center Samaritan",HCF_info$HCF_name)
+HCF_info$HCF_name<- gsub("Advantage Living Center Northwest.*","Advantage Living Center Northwest",HCF_info$HCF_name)
+HCF_info$HCF_name<- gsub("Advantage Living Center Northwest.*","Advantage Living Center Northwest",HCF_info$HCF_name)
+HCF_info$HCF_name<- gsub("Heartland Healthcare Center Grosse Pointe Woods.*","Heartland Healthcare Center Grosse Pointe Woods",HCF_info$HCF_name)
+HCF_info$HCF_name<- gsub("Divinity Home Care.*","Divinity Home Care",HCF_info$HCF_name)
+HCF_info$HCF_name<- gsub("DMC Rehabillitation Institute of Michigan","DMC Rehabilitation Institute of Michigan",HCF_info$HCF_name)
+HCF_info$HCF_name<- gsub("Ascension Providence Southfield","Ascension Providence Park Southfield",HCF_info$HCF_name)
+HCF_info$HCF_name<- gsub("Ascension Providence Southfield","Ascension Providence Park Southfield",HCF_info$HCF_name)
+
+HCF_info$HCF_name <- trimws(HCF_info$HCF_name) # trim white space
+
+MDHHS_CCN <- HCF_info %>%
+  select(HCF_name, HCF_CCN)
+
+HCF_coord <- HCF_info %>%
+  select(HCF_name, lon, lat)
+
+# subset HCF w/ coordinates
+HCF_type <- HCF_info %>%
+  select(HCF_name, HCF_type)
+
+```
+
+
+```{r }
+# fix the isolate ID and corresponding NCBI
+key[Isolate_ID=="20MP010425","NCBI_SAMN"] <- "20MP010425-WI-M3453-201110"
+key[Isolate_ID=="20MP010444","NCBI_SAMN"] <- "20MP010444-WI-M5194-201116_S17"
+
+# get Isolate_ID and Patient_ID
+key2 <- patient_ID %>%
+  select(Isolate_ID, Patient_ID)
+key3 <- merge(key, key2, by = "Isolate_ID")
+patient_ID_key <- merge(patient_ID, key,by = "Isolate_ID")
+patient_type <- patient_ID_key %>%
+  select(NCBI_SAMN,`Isolate Type`)
+
+
+# renaming observations loc_date
+patient_loc <- apply(patient_loc,2,function(x){gsub('Henry Ford Macomb Hospital Hospital','Henry Ford Macomb Hospital',x)})
+patient_loc <- apply(patient_loc,2,function(x){gsub('DMC Rehabillitation Institute of Michigan','DMC Rehabilitation Institute of Michigan',x)})
+patient_loc <- apply(patient_loc,2,function(x){gsub('Regency at Bluffs','Regency at Bluffs Park',x)})
+patient_loc <- apply(patient_loc,2,function(x){gsub('Regency at Bluffs Park Park','Regency at Bluffs Park',x)})
+patient_loc <- apply(patient_loc,2,function(x){gsub('Ascension Providence Southfield','Ascension Providence Park Southfield',x)})
+patient_loc <- as.data.frame(patient_loc)
+
+
+# merge key with location data
+patient_loc_key <- merge(key3, patient_loc,  by = "Patient_ID", all = TRUE) 
+patient_loc_key <- patient_loc_key %>%
+  mutate(Isolate_ID = Isolate_ID.x) %>%
+  select(-c(Isolate_ID.x, Isolate_ID.y))
+
+
+# merge location and isolate collection dates
+patient_loc_key_ID <- merge(patient_ID, patient_loc_key, by = "Isolate_ID", all = TRUE)
+patient_loc_key_ID <- as.data.table(patient_loc_key_ID) # change df to data.table before tranposing to long 
+
+patient_loc_key_ID <- patient_loc_key_ID %>%
+  mutate(Patient_ID = Patient_ID.x) %>%
+  select(-c(Patient_ID.x,Patient_ID.y))
+
+patient_loc_key_ID <- arrange(patient_loc_key_ID, Specimen_collection_date)
+
+
+# make sure the name of the tree label.tips matches the list 
+MDHHS_list1 <- MDHHS_list
+MDHHS_list1[MDHHS_list1$x=="20MP010425-WI-M3453-201110_S1",2] <- "20MP010425-WI-M3453-201110"
+
+##
+```
+
+```{r}
+## Isolate type
+print("Number of Patients")
+print("Isolate type")
+table(patient_loc_key_ID$`Isolate Type`)
+```
+
+
+```{r }
+# only keep MDHHS samples and the outgroup
+dna_aln2 <- as.data.frame(dna_aln) 
+dna_aln2 <- filter(dna_aln2, rownames(dna_aln2)%in%MDHHS_list1$x|rownames(dna_aln2)=='SAMEA3531785')
+dna_aln <- as.matrix(dna_aln2)
+#write.table(dna_aln, "../data/dna_aln.csv")
+#read_csv(dna_aln, "../data/dna_aln.csv")
+# get the index of the outgroup
+out_group <- which(row.names(dna_aln)=="SAMEA3531785") 
+class(dna_aln)
+
+# filter out outgroup
+dna_aln_no_outgroup <- dna_aln[-which(row.names(dna_aln)=="SAMEA3531785"),] 
+class(dna_aln_no_outgroup)
+
+# return named vector with TRUE/FALSE (whether that position has more than one allele)
+multi_allele <- apply(dna_aln_no_outgroup,
+                      2,
+                      FUN = function(aln_pos)
+                      {
+                        
+                        pos_alleles <- unique(aln_pos)
+                       # print(pos_alleles)
+                        
+                        dna_aln_no_outgroup <- setdiff(pos_alleles, c('-', 'n')) # setdiff(a,b): find all values in a that do not occur in b, aka find all unique values besides'-','n' 
+                        
+                        return(length(dna_aln_no_outgroup) > 1) # get the positions where there were more than one alleles
+                        
+                      })
+
+dna_aln <- dna_aln[,which(multi_allele==TRUE)] # subset dna_aln to postions with more than one allele 
+
+
+#  create shared variants matrix
+dna_shared_mat = matrix(0, nrow = nrow(dna_aln), ncol = nrow(dna_aln), dimnames = list(row.names(dna_aln), row.names(dna_aln)))
+dna_shared_vec <- apply(combn(nrow(dna_aln), 2), 2, FUN = function(x){ # create dataset with all combinations of pair-wise comparison of 
+  sum(dna_aln[x[1],] != dna_aln[out_group, ] &  # from each pair-wise comparision, if the alleles from the first one in the pair was different from the outgroup allele (gets boolean), then add up those that were true 
+        dna_aln[x[1], ] == dna_aln[x[2], ] & # see if alleles between the pairwise comparison (boolean), then add up those that were true
+        dna_aln[x[1], ] != "-" & # exclude those that were "-"
+        dna_aln[x[1], ] != 'n' & # exclude those that were "n"
+        dna_aln[out_group, ] != "-" & # exclude those that were "-"
+        dna_aln[out_group, ] != 'n') # exclude those that were "n"
+})
+dna_shared_mat[t(combn(nrow(dna_aln), 2))] = dna_shared_vec # upper triangle
+dna_shared_mat[t(combn(nrow(dna_aln), 2))[,2:1]] = dna_shared_vec # lower triangle
+
+# write.csv(dna_shared_mat, "../data/dna_shared_var_mat.csv")
+read.csv("../data/dna_shared_var_mat.csv",row.names=1)
+```
+
+
+
+```{r long form patient transfer data}
+# Reformat MDHHS transfer data to long
+# tranpose from wide to long format
+patient_loc_key_ID_long <- melt(patient_loc_key_ID, id.vars = c("NCBI_SAMN"),
+                                measure.vars = list(HCF = c(paste0("HCF_exposure_",seq(1,7,1))),
+                                                    AdmitDate = c(paste0("HCF_",seq(1,7,1),"_admit_dt")),
+                                                    DischargeDate = c(paste0("HCF_",seq(1,7,1),"_discharge_dt")),
+                                                    CollectionDate = "Specimen_collection_date",
+                                                    Patient_ID = rep(c("Patient_ID"),7),
+                                                    Isolate_ID = rep(c("Isolate_ID"),7),
+                                                    Isolate_type = rep(c("Isolate Type"),7)))
+
+patient_loc_key_ID_long$HCF <- trimws(patient_loc_key_ID_long$HCF)
+patient_loc_ID_long <- patient_loc_key_ID_long
+# change variable formats to date
+patient_loc_ID_long$AdmitDate <- as.Date(patient_loc_ID_long$AdmitDate, format = "%m/%d/%y")
+patient_loc_ID_long$DischargeDate <- as.Date(patient_loc_ID_long$DischargeDate, format = "%m/%d/%y")
+patient_loc_ID_long$CollectionDate <- as.Date(patient_loc_ID_long$CollectionDate, format = "%Y-%m-%d")
+
+HCF_location <- unique(patient_loc_ID_long$HCF)
+# filter out missing location/date data and possibly incorrect dates
+```
+
+
+```{r data cleaning of long form}
+patient_loc_ID_long1 <- patient_loc_ID_long %>%
+  filter(HCF!="") %>%
+  filter(NCBI_SAMN!="SAMN24979401")
+
+patient_loc_ID_long1 <- patient_loc_ID_long1 %>%
+  arrange(NCBI_SAMN, variable) %>%
+  mutate(DischargeDate=as.Date(ifelse(is.na(DischargeDate), lag(AdmitDate),DischargeDate), origin = "1970-01-01"),
+         AdmitDate=as.Date(ifelse(is.na(AdmitDate), DischargeDate,AdmitDate),origin ="1970-01-01"))
+
+#patient_loc_ID_long1 <- patient_loc_ID_long1 %>%
+#  filter(!is.na(AdmitDate)&!is.na(DischargeDate))
+
+## Find abnormal/missing AdmitDates dates
+abnormal_Admit_v <- which(patient_loc_ID_long1$AdmitDate<as.Date("2019-01-01")|is.na(patient_loc_ID_long1$AdmitDate)) # get all transfer admit dates that don't make sense
+patient_loc_ID_long1$NCBI_SAMN[abnormal_Admit_v ]
+weird_admit_df <- patient_loc_ID_long1[patient_loc_ID_long1$NCBI_SAMN%in%patient_loc_ID_long1$NCBI_SAMN[abnormal_Admit_v ],]
+
+## Find abnormal Discharge dates
+abnormal_Discharge_v <-which(patient_loc_ID_long1$DischargeDate<as.Date("2019-01-01")|is.na(patient_loc_ID_long1$DischargeDate)) # get all transfer discharge dates that don't make sense
+patient_loc_ID_long1$NCBI_SAMN[abnormal_Discharge_v]
+weird_discharge_df <- patient_loc_ID_long1[patient_loc_ID_long1$NCBI_SAMN%in%patient_loc_ID_long1$NCBI_SAMN[abnormal_Discharge_v],]
+
+weird_df <- rbind(weird_admit_df, weird_discharge_df) %>%
+  distinct() 
+
+# impute the suspicious dates with probable dates
+weird_df <- weird_df %>%
+  arrange(NCBI_SAMN, desc(variable)) %>%
+  group_by(NCBI_SAMN) %>%
+  mutate(to_change = ifelse(AdmitDate<as.Date("2019-01-01")|DischargeDate<as.Date("2019-01-01")|is.na(AdmitDate)|is.na(DischargeDate),1,0),
+         AdmitDate_new = ifelse(AdmitDate<as.Date("2019-01-01"), lag(DischargeDate), AdmitDate),
+         AdmitDate_new = case_when(is.na(AdmitDate_new)&is.na(DischargeDate)~lead(AdmitDate-1),
+                                   is.na(AdmitDate_new)~DischargeDate-1,
+                                   TRUE ~  AdmitDate),
+         DischargeDate_new = ifelse(DischargeDate<as.Date("2019-01-01")|is.na(DischargeDate), lead(AdmitDate),DischargeDate),
+         AdmitDate = AdmitDate_new,
+         DischargeDate = DischargeDate_new) %>%
+  select(-c(AdmitDate_new, DischargeDate_new)) %>%
+  filter(to_change==1) %>% # only keep isolates that I want to change
+  select(-to_change)
+
+weird_df$AdmitDate <- as.Date(weird_df$AdmitDate,origin ="1970-01-01")  
+weird_df$DischargeDate <- as.Date(weird_df$DischargeDate,origin ="1970-01-01")  
+
+#patient_loc_ID_long1 <- patient_loc_ID_long1[-c(58,201,236,288,250),] # remove none-sense dates
+patient_loc_ID_long1$HCF <- trimws(patient_loc_ID_long1$HCF)
+patient_loc_ID_long1 <- rbind(patient_loc_ID_long1, weird_df) %>%
+  filter(AdmitDate>as.Date("2019-01-01") & DischargeDate>as.Date("2019-01-01")) %>%
+  group_by(NCBI_SAMN, Patient_ID,variable) %>%
+  arrange(NCBI_SAMN, variable) 
+
+# collapse patient transfers that were from the same hospital
+patient_loc_ID_long1$duplicate_HCF <- 0
+for(i in 1:(nrow(patient_loc_ID_long1)-1)){
+  if(patient_loc_ID_long1$NCBI_SAMN[i]==patient_loc_ID_long1$NCBI_SAMN[i+1] & patient_loc_ID_long1$HCF[i]==patient_loc_ID_long1$HCF[i+1]){ # if the previous transfer were the same as the latter transfer
+   patient_loc_ID_long1$AdmitDate[i] <- patient_loc_ID_long1$AdmitDate[i+1] # Assign the Admit date as the previous transfer
+    patient_loc_ID_long1$duplicate_HCF[i+1] <- 1
+  }
+  else{
+    next
+  }
+}
+
+patient_loc_ID_long1 <- patient_loc_ID_long1 %>%
+  filter(duplicate_HCF==0)
+patient_loc_ID_long1$HCF <- trimws(patient_loc_ID_long1$HCF)
+```
+
+```{r}
+patient_loc_ID_wide <- patient_loc_ID_long1 %>%
+  pivot_wider(id_cols = c(Patient_ID, NCBI_SAMN), values_from = HCF, names_from = variable, names_prefix = "HCF_exposure")
+
+first_pt_loc <- patient_loc_ID_wide %>% 
+  merge(patient_loc_key,by = c("Patient_ID","NCBI_SAMN"), all.x = TRUE) %>%
+  select(-c(HCF_exposure_1,HCF_exposure_2,HCF_exposure_3,HCF_exposure_4,HCF_exposure_5,HCF_exposure_6,HCF_exposure_7)) %>%# delete redundent columns
+  mutate(Specimen_collection_date = HCF_1_discharge_dt) %>%
+  group_by(Patient_ID) %>%
+  arrange(Patient_ID) %>%
+  mutate(num = row_number()) %>%
+  filter(num ==1) %>% # only keep first isolate for patients 
+  ungroup()%>%
+  arrange(Specimen_collection_date) # sort data by Specimen collection date
+```
+
+```{r keep first isolate}
+# only keep first isolate for patients
+# first_pt_loc <- patient_loc_key_ID %>%
+#   group_by(Patient_ID) %>%
+#   arrange(Patient_ID,Specimen_collection_date)%>%
+#   mutate(num = row_number()) %>%
+#   filter(num ==1) %>% # only keep first isolate for patients 
+#   ungroup()%>%
+#   arrange(Specimen_collection_date) # sort data by Specimen collection date
+
+first_pt_loc <- first_pt_loc %>%
+  filter(NCBI_SAMN!="SAMN16828101") # excluding the outgroup isolate
+
+first_pt_loc_long <- patient_loc_ID_long1 %>%
+  filter(NCBI_SAMN%in%first_pt_loc$NCBI_SAMN) # filter long form patient trace to the first isolated sample per patient
+
+
+```
+

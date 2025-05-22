@@ -1,0 +1,245 @@
+---
+title: "1_functions"
+author: "Tiffany Wan"
+date: "2025-05-21"
+output: html_document
+---
+
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(graph4lg)
+```
+
+
+
+pt_loc_long
+```{r}
+pt_loc_long <- read.csv("../data/pt_loc_long.csv") %>%select(-X)
+pt_loc_long$AdmitDate <- as.Date(pt_loc_long$AdmitDate)
+pt_loc_long$DischargeDate <- as.Date(pt_loc_long$DischargeDate)
+pt_loc_long$CollectionDate <- as.Date(pt_loc_long$CollectionDate)
+
+```
+
+```{r}
+seq_mat <- as.matrix(fread("../data/dna_shared_var_mat.csv")%>%
+  column_to_rownames(var="V1")) 
+
+seq_mat <- seq_mat[which(row.names(seq_mat)%in%pt_loc_long$NCBI_SAMN),which(colnames(seq_mat)%in%pt_loc_long$NCBI_SAMN)] 
+```
+
+```{r}
+# long form matrix
+get_mat_long <- function(mat){
+  if( class(mat)[1]!="matrix"){
+    mat = as.matrix(mat)
+  }
+  mat_long <- t(combn(colnames(mat),2))
+  mat_long <- data.frame(mat_long, var = mat[mat_long])
+  colnames(mat_long) <- c("X1","X2","var")
+  return(mat_long)
+}
+```
+
+
+### variables: 
+1. NCBI_SAMN: Genome ID
+2. CollectionDate
+3. transfer_order: patient transfer order from most to least recent  
+4. Collection_facility; facility where isolate was sequenced
+```{r}
+get_epi_links <-function(pt_loc_long, seq_mat){ # input: 1. patient_transfer data frame with HCF exposures, unique ID and transfer dates. 2. shared_variant_matrix with sample unique ID
+  
+  # subset data to sample collection facility
+  iso_df <- pt_loc_long %>%
+    filter(Collection_facility=="Yes") %>% # only keep obs. with sample collection dates 
+    select(NCBI_SAMN ,CollectionDate, transfer_order) %>%
+    arrange(CollectionDate) # rearrange by date
+
+  #  keep only shared variants from the first isolate of each patient
+  reordered_seq_mat <- reorder_mat(seq_mat,iso_df$NCBI_SAMN) # reorder the matrix by the order of the (unique ID) from patient transfer data 
+  reordered_seq_mat_long <- get_mat_long(reordered_seq_mat)
+
+  
+  ## getting the maximal shared variants at each given time point
+  dist_df <- NULL
+  for (i in (2:nrow(reordered_seq_mat))){ # start from second isolate (bc first isolate can only be source)
+    subset_v <- colnames(reordered_seq_mat)[1:i]
+    submat_long <- reordered_seq_mat_long[which(reordered_seq_mat_long$X1%in%subset_v&reordered_seq_mat_long$X2%in%subset_v), ]
+    submat_long$id <- i
+    dist_df <- rbind(dist_df, submat_long)
+  }
+  
+  # clean data.frame to only keep unique variant values per pair and rank'em
+  dist_df <- dist_df %>%
+    mutate(source = X1,
+           NCBI_SAMN = X2) %>%
+    distinct(source, NCBI_SAMN, var, .keep_all = TRUE) %>% # de-duplicate data
+    #distinct() %>%
+    group_by(id) %>%
+    mutate(msv_rank = dense_rank(-var)) %>%# get the rank of the variants by descending order
+    select(-c(X1,X2))
+
+    dist_df_max <- dist_df %>%
+      group_by(id) %>%
+      filter(msv_rank == 1)
+    
+    # full join test_df with the HCF info data frame
+    pt_transfer_long <- merge(dist_df_max,pt_loc_long, by= "NCBI_SAMN",all = TRUE) 
+    pt_transfer_long$CollectionDate <- as.numeric(pt_transfer_long$CollectionDate)
+    pt_transfer_long$AdmitDate <- as.numeric(pt_transfer_long$AdmitDate)
+    pt_transfer_long$CollectionDate <- as.numeric(pt_transfer_long$CollectionDate)
+
+    # Check if patient likely acquired NDM at isolate collection hospital
+    pt_transfer_long1 <- pt_transfer_long %>%
+      group_by(NCBI_SAMN) %>%
+      arrange(NCBI_SAMN, transfer_order) %>%
+      mutate(HCF_acquired = ifelse(CollectionDate>AdmitDate + 2, 1, 0))  # find isolates where collection date is <48 hrs after admit date
+    
+    # get cases that only have one healthcare exp. and was collected less than 48 hours after admission
+    single_HCF_and_non_acquirer <- pt_transfer_long1 %>%
+      distinct(NCBI_SAMN, HCF, .keep_all = TRUE) %>%
+      group_by(NCBI_SAMN) %>%
+      summarise(num_of_HCFs=n())
+    
+    # flag isolates that have same-day collection HCF, and only single HCF exp. 
+    pt_transfer_long1 <- pt_transfer_long1 %>%
+      mutate(HCF_sameday_and_single = ifelse(HCF_acquired==0 & NCBI_SAMN %in%single_HCF_and_non_acquirer$NCBI_SAMN[which(single_HCF_and_non_acquirer$num_of_HCFs==1)],1,0))
+    
+
+    ####################### Assign transfer groups ###############################################
+    pt_transfer_long1$epi_type <- 0
+    pt_transfer_long1$epi_HCF <- 0
+    pt_transfer_long1$from <- 0
+    pt_transfer_long1$to <- 0
+ 
+    for(i in 1:nrow(pt_transfer_long1)){
+      
+      # acquirer patient of interest info
+      v_aq <- pt_transfer_long1$NCBI_SAMN[i] # the name of the acquirer to compare
+      HCF_aq <- pt_transfer_long1$HCF[i] # the HCF to compare for shared exposure 
+      #posititive_HCF_aq <- pt_transfer_long1$HCF_acquired[i] # whether this this isolate is sampled at HCF of acquirement (1/0/NA - for non- sample collection HCFs) 
+      
+      # source patient info
+      v_source <- pt_transfer_long1$source[i] # name of the source
+      ls_HCF_source <- pt_transfer_long1$HCF[which(pt_transfer_long1$NCBI_SAMN==v_source)] #sources' healthcare exps.
+      dt_source <- unique(pt_transfer_long1$HCF[which(pt_transfer_long1$NCBI_SAMN==v_source &!is.na(pt_transfer_long1$CollectionDate))]) # source' sample collection HCF
+      #dt_source <- unique(pt_transfer_long1$HCF[which(pt_transfer_long1$NCBI_SAMN==v_source &!is.na(pt_transfer_long1$CollectionDate))]) # source' sample collection HCF
+      dt_aq <- unique(pt_transfer_long1$HCF[which(pt_transfer_long1$NCBI_SAMN==v_aq & !is.na(pt_transfer_long1$CollectionDate))]) # acquirers' sample collection HCF
+      
+      # skip index patient who does not have a source
+      if(is.na(v_source)){
+        next
+      }
+      
+      ## If shared exp. isolate collection were <48hrs before admission
+      else if(pt_transfer_long1$HCF_acquired[i]==0 & pt_transfer_long1$HCF_sameday_and_single[i]!=1 & !is.na(pt_transfer_long1$HCF_acquired[i])){
+        next
+      }
+      
+      ## If there WERE shared exp. between source and acquirer
+       else if(HCF_aq %in% ls_HCF_source){
+          if(HCF_aq==dt_source & !is.na(pt_transfer_long1$CollectionDate[i])){ # if shared HCF is the samples collection HCF of source & is the samples collection HCF of the patient of interest
+            pt_transfer_long1$epi_type[i] <- 1
+            pt_transfer_long1$epi_HCF[i] <- dt_source
+            pt_transfer_long1$from[i] <- dt_source
+            pt_transfer_long1$to[i] <- HCF_aq
+            # dt_source==HCF_aq
+          }
+          else if(!is.na(pt_transfer_long1$CollectionDate[i])){ # if shared HCF is the collection HCF of the patient of interest
+            pt_transfer_long1$epi_type[i] <- 2
+            pt_transfer_long1$epi_HCF[i] <-  dt_source
+            pt_transfer_long1$from[i] <- HCF_aq
+            pt_transfer_long1$to[i] <-  HCF_aq
+            #from: shared health exp. with source (HCF_aq) to:  source sample collection HCF (dt_source)
+          }
+          else if(HCF_aq==dt_source){ # if the shared HCF is the sample collection HCF of source
+            pt_transfer_long1$epi_type[i] <- 3
+            pt_transfer_long1$epi_HCF[i] <-  HCF_aq
+            pt_transfer_long1$from[i] <- dt_source
+            pt_transfer_long1$to[i] <- dt_aq
+          }
+          else { # if the shared HCF is neither sample collection HCF of source nor patient of interest 
+            pt_transfer_long1$epi_type[i] <- 4
+            pt_transfer_long1$epi_HCF[i] <-  HCF_aq
+            pt_transfer_long1$from[i] <- HCF_aq
+            pt_transfer_long1$to[i] <- dt_aq
+          }
+        }
+      ## if there were NO shared exp. between source and acquirer
+        else {
+          pt_transfer_long1$epi_type[i] <- 0
+          pt_transfer_long1$epi_HCF[i] <- dt_source
+          pt_transfer_long1$from[i] <- dt_source
+          pt_transfer_long1$to[i] <- dt_aq
+        }
+      }
+    
+    pt_transfer_long1$epi_type <- as.numeric(pt_transfer_long1$epi_type)
+    pt_transfer_long1 <- pt_transfer_long1 %>%
+      filter(from!=0)
+    pt_transfer_long1 <- pt_transfer_long1 %>%
+      filter(!is.na(source)) # remove index case
+   
+    ##################################################################################
+## summarise the epitype to find rows without assigned epi_types
+    pt_transfer_long1_sum <- pt_transfer_long1 %>%
+      mutate(epi_type = ifelse(is.na(epi_type),0,epi_type)) %>%
+      group_by(NCBI_SAMN) %>%
+      arrange(NCBI_SAMN,epi_type) %>%
+      summarise(sum = sum(epi_type)) # if sum==0 means this isolate only have genomic only (no epilinks)
+    
+    other_list <- pt_transfer_long1_sum$NCBI_SAMN[which(pt_transfer_long1_sum$sum==0)] ## genomic only links
+
+      pt_transfer_long3 <- pt_transfer_long1 %>%
+        group_by(NCBI_SAMN) %>%
+        arrange(CollectionDate,NCBI_SAMN) %>%
+        mutate(row_num = row_number()) %>%
+        mutate(epi_type = ifelse(NCBI_SAMN%in%other_list & !is.na(CollectionDate),5,ifelse(NCBI_SAMN%in%other_list & row_num==1,5,epi_type))) %>%  # flag the isolate that only has inter-no epilink
+        filter(epi_type!=0) %>% # clean out uninformative data
+        group_by(NCBI_SAMN) %>%
+        arrange(NCBI_SAMN,epi_type) %>%
+        distinct(NCBI_SAMN, source, epi_type, epi_HCF, from , to, .keep_all = TRUE)
+    
+    ####### reassigning source iff epitype = 2, and a new case only has epi_type=0 ###
+    epi_2_source_unknown <- other_list[other_list%in%unique(pt_transfer_long3$source[which(pt_transfer_long3$epi_type==2)])] 
+    epi2_df <- data.frame(NCBI_SAMN = pt_transfer_long3$NCBI_SAMN[pt_transfer_long3$epi_type==2],
+                          source = pt_transfer_long3$source[pt_transfer_long3$epi_type==2]) # find the sources isolate id (NCBI_SAMN) for isolated that are epi_type 2
+    source_to_update <- unique(pt_transfer_long3$NCBI_SAMN[pt_transfer_long3$NCBI_SAMN%in%epi2_df$source & pt_transfer_long3$epi_type==5]) # find the ones that only have unknown sources
+    #intersect(source_to_update,other_list)
+    
+    epi2_df_sub <- epi2_df %>%
+      filter(source%in%source_to_update)
+    source_update_df <- pt_transfer_long3[pt_transfer_long3$source%in%epi2_df_sub$source & pt_transfer_long3$NCBI_SAMN %in% epi2_df_sub$NCBI_SAMN & pt_transfer_long3$epi_type==2,] # subset to epi_type2 sources that has unknown sources 
+    ##################################################################################
+    
+    pt_transfer_long3$update <- 0 # add variable to indicate original
+    source_update_df$update <- 1 # add variable to indicate updated
+    source_update_df <- source_update_df %>%
+      ungroup() %>%
+      mutate(new_NCBI_SAMN = source,
+             source = NCBI_SAMN,
+             from = HCF,
+             to = epi_HCF) %>%
+      select(-NCBI_SAMN) %>%
+      mutate(NCBI_SAMN = new_NCBI_SAMN) %>%
+      select(-new_NCBI_SAMN) 
+    
+    pt_transfer_long4 <- rbind(pt_transfer_long3, source_update_df) # bind with updated df
+    #table(pt_transfer_long4$epi_type)
+  
+  
+  out <- pt_transfer_long4 # output list:1. pair_df for getting sources with maximum shared variants 2. and the actual output of interest
+
+  return(out)
+  
+}
+```
+
+```{r}
+
+test <- get_epi_links(pt_loc_long = pt_loc_long , seq_mat = seq_mat)
+
+```

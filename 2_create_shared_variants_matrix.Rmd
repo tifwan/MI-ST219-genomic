@@ -1,0 +1,55 @@
+---
+title: "2_create_shared_variants_matrix"
+author: "Tiffany Wan"
+date: "2025-05-21"
+output: html_document
+---
+
+
+```{r}
+dna_aln <- fread("~/Desktop/flux_mount_gl/Project_MDHHS_genomics/Analysis/ST219_NDM_regional_transmission/transmission_analysis_R_script/data/dna_aln.csv") %>%
+  column_to_rownames(var = "V1")
+dna_aln <- as.matrix(dna_aln)
+```
+
+```{r}
+# outgroup from variant calling
+out_group <- "SAMEA3531785"
+```
+
+```{r}
+get_shared_var <- function(variant_aln, outgroup){
+
+  out_group_i <- which(row.names(variant_aln)==out_group ) 
+
+  # filter out outgroup from 
+  aln_no_outgroup <- variant_aln[-out_group_i,] 
+  multi_allele <- apply(aln_no_outgroup,
+                        2,
+                        FUN = function(aln_pos)
+                        {
+                          pos_alleles <- unique(aln_pos)
+                          aln_no_outgroup <- setdiff(pos_alleles, c('-', 'n')) 
+                          return(length(aln_no_outgroup) > 1) # get the positions where there were more than one alleles
+                        })
+  variant_aln <- variant_aln[,which(multi_allele==TRUE)] # subset variant_aln to postions with more than one allele 
+  shared_var_mat = matrix(0, nrow = nrow(variant_aln), ncol = nrow(variant_aln), dimnames = list(row.names(variant_aln), row.names(variant_aln)))
+  shared_v <- apply(combn(nrow(variant_aln), 2), 2, FUN = function(x){ 
+    sum(variant_aln[x[1],] != variant_aln[out_group, ] &  
+          variant_aln[x[1], ] == variant_aln[x[2], ] & 
+          variant_aln[x[1], ] != "-" & # exclude those that were "-"
+          variant_aln[x[1], ] != 'n' & # exclude those that were "n"
+          variant_aln[out_group, ] != "-" & # exclude those that were "-"
+          variant_aln[out_group, ] != 'n') # exclude those that were "n"
+  })
+  shared_var_mat[t(combn(nrow(variant_aln), 2))] = shared_v # upper triangle
+  shared_var_mat[t(combn(nrow(variant_aln), 2))[,2:1]] = shared_v # lower triangle
+  
+  return(shared_var_mat)
+}
+```
+
+```{r}
+dna_shared_mat <- get_shared_var(variant_aln =dna_aln, outgroup="SAMEA3531785")
+```
+

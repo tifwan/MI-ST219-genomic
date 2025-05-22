@@ -1,0 +1,109 @@
+---
+title: "4_permutation_test"
+author: "Tiffany Wan"
+date: "2025-05-21"
+output: html_document
+---
+
+```{r}
+
+```
+
+
+```{r}
+# hcf_exp_v <- c(paste0("HCF_exposure",seq(1,7,1)))
+# for (j in c(paste0("HCF_exposure",seq(1,7,1)))){
+#   to_update_v <- pt_loc_wide[,j]
+#   new_v <- c()
+#   for (i in 1:length(to_update_v)){
+#     new_v <- c(new_v,location_df$pseudo_HCF[location_df$HCF_name==to_update_v[i]][1])
+#   }
+#   pt_loc_wide[,j] <- new_v
+# }
+#write.csv(pt_loc_wide, "../data/pt_loc_wide.csv")
+pt_loc_wide <- read.csv("../data/pt_loc_wide.csv") %>%select(-X)
+
+```
+
+```{r}
+seq_mat <- as.matrix(fread("../data/dna_shared_var_mat.csv")%>%
+  column_to_rownames(var="V1")) 
+
+seq_mat <- seq_mat[which(row.names(seq_mat)%in%pt_loc_long$NCBI_SAMN),which(colnames(seq_mat)%in%pt_loc_long$NCBI_SAMN)] 
+```
+
+# load the get_epi_links function before running permutation test
+```{r}
+########### function: epi_perm_test ##################
+epi_perm_test <- function(epi_df, n_perm){
+
+  startTime <- Sys.time()
+   # list to store each randomized data frame
+  sample_list <- vector(mode = "list", length =n_perm) 
+  
+  for(i in 1:n_perm){
+    
+      sample_list[[i]] <- epi_df # duplicate original first_pt_loc data 
+      # randomize IDs
+    sample_list[[i]]$NCBI_SAMN <- sample(sample_list[[i]]$NCBI_SAMN, size = nrow(sample_list[[i]]), replace = FALSE) # sample the NCBI_SAMN IDs of the data frame
+  }
+  
+  sample_list_long <- lapply(sample_list, function(df){
+    df <- setDT(df)
+    df_long <- melt(df, id.vars = c("NCBI_SAMN"),
+                                measure.vars = list(HCF = c(paste0("HCF_exposure",seq(1,7,1))),
+                                                    AdmitDate = c(paste0("HCF_",seq(1,7,1),"_admit_dt")),
+                                                    DischargeDate = c(paste0("HCF_",seq(1,7,1),"_discharge_dt")),
+                                                    CollectionDate = "Specimen_collection_date"
+                                                  ))
+    df_long <- df_long %>%
+      mutate(transfer_order = variable) %>%
+      mutate(Collection_facility = ifelse(!is.na(CollectionDate),"Yes","No"))
+    out <- df_long %>%
+      filter(HCF!="")
+    out$HCF <- trimws(out$HCF)
+    out$AdmitDate <- as.Date(out$AdmitDate, format = "%m/%d/%y")
+    out$DischargeDate <- as.Date(out$DischargeDate, format = "%m/%d/%y")
+    out$CollectionDate <- as.Date(out$CollectionDate, format = "%m/%d/%y")
+    return(out)
+  }
+  )
+  
+  v_prop <- sapply(sample_list_long, function(df){
+    # apply the get_epi_links function to permutation datasets
+    epi_link_df <- get_epi_links(pt_loc_long = df , seq_mat = seq_mat)
+    # get the sum of patients with known/ unknown transfer epi_links respectively 
+    epi_link_df1 <- epi_link_df %>%
+      group_by(NCBI_SAMN) %>%
+      mutate(n = n(),
+             weight = 1/n,
+             known = ifelse(epi_type == 5, 0, 1))%>%
+      ungroup() %>%
+      group_by(known)%>%
+      summarize(count = sum(weight))
+    
+    # calculate proportion of unknown
+    prop_unknown <- epi_link_df1$count[epi_link_df1$known==0]/(epi_link_df1$count[epi_link_df1$known==0]+ epi_link_df1$count[epi_link_df1$known==1])
+    #print(prop_unknown)
+    return(prop_unknown)
+  })
+  endTime <- Sys.time()
+  print("Total run time")
+  print(endTime - startTime)
+  return(v_prop)
+}
+```
+
+```{r run permutation function}
+set.seed(0)
+sample_prop_unknown <- epi_perm_test(pt_loc_wide, 100)
+prop_unknown_df <- as.data.frame(sample_prop_unknown)
+data_prop <- length(which(test$epi_type==5))/nrow(test) # output from get_epilink function
+ggplot(prop_unknown_df, aes(x = sample_prop_unknown))+ geom_histogram(binwidth = 0.02) + theme_bw() + labs(x = "Proportion no epidemiologic link", y= "Frequency") + geom_vline(xintercept = data_prop, color = "red",linetype = "dashed")
+#ggsave("~/Dropbox (University of Michigan)/MDHHS regional genomics project/Manuscripts/2022 - ST219 regional transmission/figures/exploratory_figures/2024_09_09_permutation_test1000.pdf", width = 9)
+# testing normality of data
+qqnorm(sample_prop_unknown)
+qqline(sample_prop_unknown)
+shapiro.test(sample_prop_unknown)
+
+```

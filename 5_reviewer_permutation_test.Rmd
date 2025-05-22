@@ -1,0 +1,75 @@
+---
+title: "Additional_permutation_test"
+author: "Tiffany Wan"
+date: "2025-05-22"
+output: html_document
+---
+
+```{r}
+pt_loc_long <- read.csv("../data/pt_loc_long.csv") %>%select(-X)
+pt_loc_long$AdmitDate <- as.Date(pt_loc_long$AdmitDate)
+pt_loc_long$DischargeDate <- as.Date(pt_loc_long$DischargeDate)
+pt_loc_long$CollectionDate <- as.Date(pt_loc_long$CollectionDate)
+```
+
+```{r}
+ # subset data to sample collection facility
+  iso_df <- pt_loc_long %>%
+    filter(Collection_facility=="Yes") %>% # only keep obs. with sample collection dates 
+    select(NCBI_SAMN ,CollectionDate, transfer_order) %>%
+    arrange(CollectionDate) # rearrange by date
+```
+
+```{r}
+permute_source <- function(n_perm = 100){
+  iter = 0
+  n_shared_v <- c()
+  while(iter<n_perm){
+    permute_source <- c(NA) # no source for the first case
+  for (i in 2:nrow(iso_df)){
+    source_i <- sample(head(iso_df$NCBI_SAMN,i-1), size = 1)
+    permute_source <- c(permute_source, source_i)
+    }
+
+  permute_case_source_df <- data.frame(case = iso_df$NCBI_SAMN,
+                                     CollectionDate = iso_df$CollectionDate,
+                                     source = permute_source,
+                                     shared_HCF = NA,
+                                     n_shared_HCF = NA)
+
+#shared sources
+  for(i in 2:nrow(permute_case_source_df)){
+    case_i <- permute_case_source_df$case[i]
+    source_i <- permute_case_source_df$source[i]
+    shared_HCF <- intersect(pt_loc_long$HCF[pt_loc_long$NCBI_SAMN==case_i],pt_loc_long$HCF[pt_loc_long$NCBI_SAMN==source_i])
+    if(length(shared_HCF)==0){
+      permute_case_source_df$shared_HCF[i] <- NA
+      permute_case_source_df$n_shared_HCF[i] <- 0
+    }
+    else{
+      permute_case_source_df$shared_HCF[i] <- list(shared_HCF)
+      permute_case_source_df$n_shared_HCF[i] <- length(shared_HCF)
+    }
+  
+  }
+
+    n_shared_v <- c(n_shared_v,length(unique(permute_case_source_df$case[permute_case_source_df$n_shared_HCF==0])))
+    iter = iter+1
+  }
+  
+  return(n_shared_v)
+}
+
+ #permute_case_source_df <- unnest(permute_case_source_df, cols =shared_HCF)
+```
+
+```{r}
+no_shared_v <- permute_source(1000)
+output_no_epilink <- length(unique(test$NCBI_SAMN[test$epi_type==5]))
+ggplot() + geom_bar(aes(x = no_shared_v)) + geom_vline(aes(xintercept = output_no_epilink), linetype="dashed", color = "red") + theme_bw() + labs(title = "1000 permutations", x = "# Cases with no shared healthcare exposure with assigned case", x = "Frequency")
+ggsave("~/Dropbox (University of Michigan)/MDHHS regional genomics project/Manuscripts/2022 - ST219 regional transmission/nature_communication_submission/manuscript_figures/new_permutation_test.pdf")
+```
+
+
+
+
